@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Amazon API Gateway REST API with Network Load Balancer integration using VPC link
+
+Parameters:
+  EnvStage:
+    Type: String
+    Default: Prod
+  ApiMethod:
+    Type: String
+    Default: GET
+  VPCId:
+    Description: Please provide a VPC to deploy the solution into.
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-0bc87082da1c0e0f9"
+  SubnetId1:
+    Description: Please provide the first Simple AD private subnet id with outbound connectivity within the VPC you selected above.
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-0491a4c7cf9897582"
+  SubnetId2:
+    Description: Please provide the second Simple AD private subnet id with outbound connectivity within the VPC you selected above.
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-0f8ad17a02b3320a6"
+  myALB:
+    Type : String
+    Default: "arn:aws:elasticloadbalancing:ap-south-1:293699174201:loadbalancer/app/myalb/aa4545bcca2ad3a6"
+  AccessLogsBucket:
+    Type : String
+    Default: "mustak-nlb1"
+
+
+Mappings:
+  RegionMap:
+    us-east-1:
+        ShortRegion: use1
+    us-west-1:
+        ShortRegion: usw1
+    us-west-2:
+        ShortRegion: usw2
+    eu-west-1:
+        ShortRegion: euw1
+    ap-southeast-1:
+        ShortRegion: ase1
+    ap-northeast-1:
+        ShortRegion: ane1
+    ap-northeast-2:
+        ShortRegion: ane2
+    ap-south-1:
+        ShortRegion: ast1
+    
+
+Resources:
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: 
+        Fn::Join:
+                - "-"
+                - - 'tlb'
+                  - '{{resolve:ssm:pcp-account-type:1}}'
+                  - '{{resolve:ssm:pcp-account-ou-name:1}}'
+                  - '{{resolve:ssm:pcp-account-name:1}}'
+                  - Fn::FindInMap:
+                    - RegionMap
+                    - Ref: AWS::Region
+                    - ShortRegion
+      Subnets:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      Type: network
+      LoadBalancerAttributes: 
+        - Key: "access_logs.s3.enabled"
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref LogsBucket
+      
+                  
+
+
+  NetworkLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Name: 
+        Fn::Join:
+                - "-"
+                - - 'tlb'
+                  - '{{resolve:ssm:pcp-account-type:1}}'
+                  - '{{resolve:ssm:pcp-account-ou-name:1}}'
+                  - '{{resolve:ssm:pcp-account-name:1}}'
+                  - Fn::FindInMap:
+                    - RegionMap
+                    - Ref: AWS::Region
+                    - ShortRegion
+      Protocol: TCP
+      VpcId: !Ref VPCId
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: "/health"
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref myALB
+          Port: 80
+      TargetType: alb
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join:
+                - "-"
+                - - 'tlb'
+                  - '{{resolve:ssm:pcp-account-type:1}}'
+                  - '{{resolve:ssm:pcp-account-ou-name:1}}'
+                  - '{{resolve:ssm:pcp-account-name:1}}'
+                  - Fn::FindInMap:
+                    - RegionMap
+                    - Ref: AWS::Region
+                    - ShortRegion
+  NetworkLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Port: '80'
+      Protocol: TCP
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AccessLogsBucket
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: AWSConsole-AccessLogs-Policy-1670420096357
+        Statement:
+          - Sid: AWSConsoleStmt-1670420096357
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::718504428378:root
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${AccessLogsBucket}/*
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${AccessLogsBucket}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AWSLogDeliveryAclCheck
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub arn:aws:s3:::${AccessLogsBucket}
+            
+  VPCLinkRestNlbInternal:
+    Type: AWS::ApiGateway::VpcLink
+    Properties:
+      Name: VPCLinkRestNlbInternal
+      TargetArns:
+        - !Ref NetworkLoadBalancer
+
+
+  UsagePlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    DependsOn:
+      - Deployment
+    Properties:
+      ApiStages:
+        - ApiId: !Ref AppApi
+          Stage: !Ref Stage
+      Description: Customer ABCs usage plan
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 200
+        RateLimit: 100
+      UsagePlanName: Plan_Monthly
+
+  ApiKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    DependsOn:
+      - Deployment
+    Properties:
+      Name: TestApiKey
+      Description: CloudFormation API Key V1
+      Enabled: 'true'
+
+  UsagePlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  
+#REST API
+  AppApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: apigw-rest-api-vpclink
+      Description: VPC Link integraton REST API 
+
+  RootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: Yes
+      RestApiId: !Ref AppApi
+      ResourceId: !GetAtt AppApi.RootResourceId
+      HttpMethod: !Ref ApiMethod
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        ConnectionType: VPC_LINK
+        IntegrationHttpMethod: !Ref ApiMethod
+        ConnectionId: !Ref VPCLinkRestNlbInternal
+        Uri: !Sub http://${NetworkLoadBalancer.DNSName}
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: ""
+            StatusCode: 200
+  GetwayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties: 
+      ResponseType: UNAUTHORIZED
+      RestApiId: !Ref AppApi
+      StatusCode: 401
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+    - RootMethod
+    Properties:
+      RestApiId: !Ref AppApi
+      
+  
+  Stage:  
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: !Ref EnvStage
+      RestApiId: !Ref AppApi
+      DeploymentId: !Ref Deployment
+      CacheClusterEnabled : true
+      CacheClusterSize: 0.5
+      MethodSettings:
+        - CachingEnabled: True
+          CacheTtlInSeconds: 10
+          HttpMethod: "*"
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          LoggingLevel: INFO
+          ResourcePath: "/*"
+        
+Outputs:
+
+  # API Gateway endpoint to be used during tests
+  AppApiEndpoint:
+    Description: API Endpoint
+    Value: !Sub "https://${AppApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
